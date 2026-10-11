@@ -1,7 +1,7 @@
 /* Fit Tracker - front end. Plain JavaScript, no build step. Talks to the Apps Script web app. */
 'use strict';
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.3.1';
 const $ = (sel, el) => (el || document).querySelector(sel);
 const $$ = (sel, el) => Array.from((el || document).querySelectorAll(sel));
 const esc = (s) => String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -565,6 +565,7 @@ function mealForm(m, isNew, assumptions, opts) {
     '<div class="grid2">' + field('Date', 'date', date, 'type="date" required max="' + today() + '"') + field('Time eaten', 'time', time, 'type="time"') + '</div>' +
     '<div class="grid2">' + numField('Calories', 'calories', m.calories, '1') + numField('Protein (g)', 'protein_g', m.protein_g, '0.1') + '</div>' +
     '<div class="grid2">' + numField('Carbs (g)', 'carbs_g', m.carbs_g, '0.1') + numField('Fat (g)', 'fat_g', m.fat_g, '0.1') + '</div>' +
+    '<div class="small mute" id="kcalHint" aria-live="polite"></div>' +
     '<details' + (m.sat_fat_g !== null && m.sat_fat_g !== undefined ? ' open' : '') + '><summary>More nutrition and tags</summary><div class="list" style="gap:14px;padding-top:8px">' +
     '<div class="grid3">' + numField('Sat fat (g)', 'sat_fat_g', m.sat_fat_g, '0.1') + numField('Trans fat (g)', 'trans_fat_g', m.trans_fat_g, '0.1') + numField('Fibre (g)', 'fiber_g', m.fiber_g, '0.1') + '</div>' +
     '<div class="grid3">' + numField('Added sugar (g)', 'added_sugar_g', m.added_sugar_g, '0.1') + numField('Sodium (mg)', 'sodium_mg', m.sodium_mg, '1') + numField('Alcohol (g)', 'alcohol_g', m.alcohol_g, '0.1') + '</div>' +
@@ -576,6 +577,25 @@ function mealForm(m, isNew, assumptions, opts) {
   const starBtn = $('#starBtn');
   starBtn.onclick = () => { starred = !starred; starBtn.setAttribute('aria-pressed', starred); starBtn.innerHTML = STAR(starred) + '<span>' + (starred ? 'In your favourites' : 'Add to favourites') + '</span>'; };
   const NUMS = ['calories', 'protein_g', 'carbs_g', 'fat_g', 'sat_fat_g', 'trans_fat_g', 'fiber_g', 'added_sugar_g', 'sodium_mg', 'alcohol_g'];
+  // Calories follow the macros: 4 kcal per gram of protein and carbs, 9 for fat, 7 for alcohol.
+  // Changing a macro recalculates calories; typing in Calories afterwards overrides it.
+  const el = form.elements, hint = $('#kcalHint');
+  const macroKcal = () => {
+    const v = ['protein_g', 'carbs_g', 'fat_g', 'alcohol_g'].map((k) => numOrNull(el[k].value));
+    if (v[0] === null && v[1] === null && v[2] === null) return null;
+    return Math.round(4 * (v[0] || 0) + 4 * (v[1] || 0) + 9 * (v[2] || 0) + 7 * (v[3] || 0));
+  };
+  const paintHint = (auto) => {
+    const calc = macroKcal(), cur = numOrNull(el.calories.value);
+    if (calc === null) { hint.innerHTML = ''; return; }
+    if (auto) { hint.textContent = 'Calories calculated from the macros' + (numOrNull(el.alcohol_g.value) ? ' and alcohol' : '') + '. Type in Calories to override.'; return; }
+    if (cur === null || Math.abs(cur - calc) <= Math.max(10, calc * 0.05)) { hint.innerHTML = ''; return; }
+    hint.innerHTML = 'The macros add up to ' + fmt(calc) + ' kcal. <button type="button" class="link" id="useCalc" style="padding:0 4px;min-height:32px">Use ' + fmt(calc) + '</button>';
+    $('#useCalc').onclick = () => { el.calories.value = calc; paintHint(true); };
+  };
+  ['protein_g', 'carbs_g', 'fat_g', 'alcohol_g'].forEach((k) => el[k].addEventListener('input', () => { const c = macroKcal(); if (c !== null) { el.calories.value = c; paintHint(true); } }));
+  el.calories.addEventListener('input', () => paintHint(false));
+  paintHint(false);
   let portionNote = '';
   $$('[data-portion]', form).forEach((el) => { el.onclick = () => {
     const p = Number(el.dataset.portion);
@@ -583,6 +603,7 @@ function mealForm(m, isNew, assumptions, opts) {
     NUMS.forEach((k) => { const v = base[k]; if (v === null || v === undefined || v === '') return; const whole = (k === 'calories' || k === 'sodium_mg'); form.elements[k].value = whole ? Math.round(v * p) : Math.round(v * p * 10) / 10; });
     const notes = form.elements.notes;
     if (notes.value === portionNote) { portionNote = p === 1 ? '' : el.textContent + ' portion'; notes.value = portionNote; }
+    paintHint(false);
   }; });
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
