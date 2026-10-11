@@ -1,7 +1,7 @@
 /* Fit Tracker - front end. Plain JavaScript, no build step. Talks to the Apps Script web app. */
 'use strict';
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const $ = (sel, el) => (el || document).querySelector(sel);
 const $$ = (sel, el) => Array.from((el || document).querySelectorAll(sel));
 const esc = (s) => String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -455,7 +455,6 @@ function addSheet(keepQuery) {
     '<label class="choice"><input type="file" accept="image/*" id="pickInput"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 16l5-5 4 4 3-3 6 6"/></svg>Choose photo</label>' +
     '<button class="choice" id="describeBtn"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h10"/></svg>Describe it</button>' +
     '<button class="choice" id="manualBtn"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>Enter by hand</button></div>' +
-    field('Note for the scan (optional)', 'note', '', 'id="scanNote" placeholder="e.g. ate half, no rice, 2 servings" maxlength="300"') +
     field('Find a food you have logged before', 'q', typeof keepQuery === 'string' ? keepQuery : '', 'id="foodSearch" type="search" placeholder="Type a few letters" autocomplete="off" autocapitalize="none"') +
     '<div id="foodLists" class="list" style="gap:14px"></div>';
   openSheet(h);
@@ -488,16 +487,35 @@ function addSheet(keepQuery) {
     }; });
   };
   search.addEventListener('input', paint); paint();
-  const onFile = (e) => { const f = e.target.files && e.target.files[0]; if (f) runScan({ file: f, text: $('#scanNote').value.trim() }); };
+  const onFile = async (e) => { const f = e.target.files && e.target.files[0]; if (f) captureSheet({ photos: [await photoToBase64(f)], text: '' }); };
   $('#camInput').onchange = onFile; $('#pickInput').onchange = onFile;
   $('#manualBtn').onclick = () => mealForm({}, true);
-  $('#describeBtn').onclick = describeSheet;
+  $('#describeBtn').onclick = () => captureSheet({ photos: [], text: '' });
 }
 
-function describeSheet() {
-  openSheet(sheetHead('Describe it') + '<form id="descForm" class="list" style="gap:14px"><label class="field">What did you eat?<textarea name="text" required maxlength="600" placeholder="e.g. 2 pieces chicken adobo, 1 cup rice, half a mango"></textarea></label><button class="btn primary" type="submit">Estimate</button></form>');
-  $('textarea', sheet).focus();
-  $('#descForm').addEventListener('submit', (e) => { e.preventDefault(); runScan({ text: formValues(e.target).text }); });
+/** The step between taking a photo and scanning: add what the photo cannot show, and more photos if useful. */
+function captureSheet(cap) {
+  const MAX = 4, n = cap.photos.length;
+  let h = sheetHead(n ? 'Add details' : 'Describe it') + '<form id="descForm" class="list" style="gap:14px">';
+  if (n) {
+    h += '<div class="row" style="gap:10px;flex-wrap:wrap">' + cap.photos.map((ph, i) =>
+      '<div style="position:relative;width:96px;height:96px"><img alt="Photo ' + (i + 1) + ' of this meal" src="data:' + esc(ph.mime) + ';base64,' + ph.data + '" style="width:96px;height:96px;object-fit:cover;border-radius:14px;border:1px solid var(--line);display:block">' +
+      '<button type="button" class="icon-btn" data-drop="' + i + '" aria-label="Remove photo ' + (i + 1) + '" style="position:absolute;top:-8px;right:-8px;width:32px;height:32px"><svg aria-hidden="true" viewBox="0 0 24 24" style="width:16px;height:16px"><path d="M6 6l12 12"/><path d="M18 6L6 18"/></svg></button></div>').join('') + '</div>';
+  }
+  h += '<label class="field">' + (n ? 'Anything the photo cannot show? (optional)' : 'What did you eat?') +
+    '<textarea name="text" maxlength="600"' + (n ? '' : ' required') + ' placeholder="' + (n ? 'e.g. ate half · 2 cups of rice · fried in oil · shared with 3 · sweetened' : 'e.g. 2 pieces chicken adobo, 1 cup rice, half a mango') + '">' + esc(cap.text) + '</textarea></label>' +
+    '<p class="small mute">Amounts and how much you ate help the most. The time is sent automatically.</p>';
+  if (n && n < MAX) h += '<div class="grid2"><label class="choice" style="min-height:52px;flex-direction:row"><input type="file" accept="image/*" capture="environment" id="moreCam">Add a photo</label><label class="choice" style="min-height:52px;flex-direction:row"><input type="file" accept="image/*" id="morePick">Add from gallery</label></div><p class="small mute">Extra photos are for the same meal: another angle, or its nutrition label.</p>';
+  h += '<button class="btn primary" type="submit">' + (n ? 'Scan' : 'Estimate') + '</button><button class="btn" type="button" id="capBack">Back</button></form>';
+  openSheet(h);
+  const form = $('#descForm'), box = form.elements.text;
+  if (!n) box.focus();
+  const keep = () => { cap.text = box.value; };
+  $$('[data-drop]', form).forEach((el) => { el.onclick = () => { keep(); cap.photos.splice(Number(el.dataset.drop), 1); if (cap.photos.length) captureSheet(cap); else addSheet(); }; });
+  const more = async (e) => { const f = e.target.files && e.target.files[0]; if (!f) return; keep(); cap.photos.push(await photoToBase64(f)); captureSheet(cap); };
+  if ($('#moreCam')) { $('#moreCam').onchange = more; $('#morePick').onchange = more; }
+  $('#capBack').onclick = () => addSheet();
+  form.addEventListener('submit', (e) => { e.preventDefault(); keep(); cap.text = cap.text.trim(); runScan(cap); });
 }
 
 /** Shrinks a photo to at most 1280px and returns base64 JPEG, so uploads stay small on mobile data. */
@@ -515,17 +533,20 @@ async function photoToBase64(file) {
   }
 }
 
-async function runScan(input) {
-  openSheet(sheetHead('Add food') + '<div class="center"><div class="spinner" role="img" aria-label="Working"></div><div><b>' + (input.file ? 'Reading your photo…' : 'Estimating…') + '</b><div class="small mute">Usually 5 to 15 seconds.</div></div></div>');
+async function runScan(cap) {
+  const n = cap.photos.length;
+  openSheet(sheetHead('Add food') + '<div class="center"><div class="spinner" role="img" aria-label="Working"></div><div><b>' + (n > 1 ? 'Reading your photos…' : (n ? 'Reading your photo…' : 'Estimating…')) + '</b><div class="small mute">Usually 5 to 15 seconds.</div></div></div>');
   try {
-    const payload = { text: input.text || '' };
-    if (input.file) { const p = await photoToBase64(input.file); payload.image = p.data; payload.mime = p.mime; }
+    const now = new Date();
+    const payload = { text: cap.text || '', when: DOW[now.getDay()] + ' ' + nowTime(), images: cap.photos };
+    if (n) { payload.image = cap.photos[0].data; payload.mime = cap.photos[0].mime; } // also understood by an older back end
     const r = await api('scan', payload);
     if (!sheet.open) return; // closed while waiting
+    if (cap.text && !r.notes) r.notes = cap.text; // keep what you told the scan with the entry
     mealForm(r, true, r.assumptions);
   } catch (e) {
-    openSheet(sheetHead('Add food') + '<div class="callout">' + esc(isOffline(e) ? 'Scanning needs a connection. You can still enter the meal by hand.' : e.message) + '</div><button class="btn primary" id="retryAdd">Back</button><button class="btn" id="byHand">Enter by hand</button>');
-    $('#retryAdd').onclick = addSheet; $('#byHand').onclick = () => mealForm({}, true);
+    openSheet(sheetHead('Add food') + '<div class="callout">' + esc(isOffline(e) ? 'Scanning needs a connection. Your photo and note are kept: try again, or enter the meal by hand.' : e.message) + '</div><button class="btn primary" id="retryScan">Try again</button><button class="btn" id="backCap">Back to photo and note</button><button class="btn" id="byHand">Enter by hand</button>');
+    $('#retryScan').onclick = () => runScan(cap); $('#backCap').onclick = () => captureSheet(cap); $('#byHand').onclick = () => mealForm({ notes: cap.text }, true);
   }
 }
 
@@ -536,7 +557,8 @@ function mealForm(m, isNew, assumptions, opts) {
   const time = m.time || (isNew && date === today() ? nowTime() : '');
   const conf = m.confidence ? '<span class="badge' + (m.confidence === 'low' ? ' warn' : '') + '">' + esc(m.confidence) + ' confidence</span>' : '';
   let h = sheetHead(isNew ? 'Review and save' : 'Edit meal') + '<form id="mealForm" class="list" style="gap:14px">';
-  if (conf || assumptions) h += '<div class="small mute">' + conf + ' ' + esc(assumptions || '') + '</div>';
+  const range = (m.calories_low && m.calories_high) ? 'Likely between ' + fmt(m.calories_low) + ' and ' + fmt(m.calories_high) + ' kcal. ' : '';
+  if (conf || assumptions || range) h += '<div class="small mute">' + conf + ' ' + esc(range) + esc(assumptions || '') + '</div>';
   if (m.review_flag) h += '<div class="callout">Worth a check: the calories and macros do not add up (' + esc(m.review_flag) + ').</div>';
   h += field('Name', 'title', m.title, 'required maxlength="200"') +
     (base ? '<div class="field">Portion<div class="chips" role="group" aria-label="Portion">' + [[0.5, '½×'], [1, '1×'], [1.5, '1½×'], [2, '2×']].map((p) => '<button type="button" class="chip" data-portion="' + p[0] + '" aria-pressed="' + (p[0] === 1) + '">' + p[1] + '</button>').join('') + '</div></div>' : '') +
