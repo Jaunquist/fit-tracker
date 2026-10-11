@@ -1,7 +1,7 @@
 /* Fit Tracker - front end. Plain JavaScript, no build step. Talks to the Apps Script web app. */
 'use strict';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const $ = (sel, el) => (el || document).querySelector(sel);
 const $$ = (sel, el) => Array.from((el || document).querySelectorAll(sel));
 const esc = (s) => String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -21,7 +21,7 @@ const THEMES = [
 
 const S = {
   conn: LS.get('conn', null),          // { url, pin }
-  data: LS.get('data', null),          // last copy of the Sheet data
+  data: null,                          // last copy of the Sheet data, loaded from the phone's cache at start-up
   queue: LS.get('queue', []),          // entries saved while offline
   prefs: LS.get('prefs', { follow: false, light: 'fairway', dark: 'night', theme: 'fairway' }),
   view: 'today', date: null, range: 30, syncing: false, syncError: ''
@@ -39,6 +39,7 @@ const nice = (s) => { const d = parseYmd(s); return DOW[d.getDay()] + ' ' + d.ge
 const fmt = (n, dp) => (n === null || n === undefined || isNaN(n)) ? '–' : Number(n).toLocaleString('en-US', { maximumFractionDigits: dp || 0, minimumFractionDigits: 0 });
 const sum = (a) => a.reduce((s, v) => s + (Number(v) || 0), 0);
 const avg = (a) => a.length ? sum(a) / a.length : null;
+const clock = (ms) => { const d = new Date(ms); return (ymd(d) === today() ? '' : nice(ymd(d)) + ' ') + pad(d.getHours()) + ':' + pad(d.getMinutes()); };
 const hm = (min) => (min === null || min === undefined) ? '–' : Math.floor(min / 60) + ' h ' + pad(Math.round(min % 60)) + ' m';
 const numOrNull = (v) => { if (v === '' || v === null || v === undefined) return null; const n = Number(String(v).replace(',', '.')); return isFinite(n) ? n : null; };
 
@@ -76,7 +77,53 @@ async function api(action, payload, conn) {
 }
 const isOffline = (e) => e instanceof TypeError; // fetch throws TypeError when the network is unreachable
 
-function saveData() { LS.set('data', S.data); }
+/* ---------- on-phone cache ----------
+   The copy of your data is kept in IndexedDB. It has far more room than localStorage, whose small
+   allowance is shared by every app on the same github.io address. */
+const IDB = {
+  db: null,
+  open() {
+    return new Promise((res, rej) => {
+      if (!('indexedDB' in window)) { rej(new Error('IndexedDB is not available')); return; }
+      const r = indexedDB.open('fit-tracker', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('kv');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error || new Error('Could not open the cache'));
+    });
+  },
+  async tx(mode, fn) {
+    if (!this.db) this.db = await this.open();
+    return new Promise((res, rej) => {
+      const t = this.db.transaction('kv', mode);
+      const req = fn(t.objectStore('kv'));
+      t.oncomplete = () => res(req.result);
+      t.onerror = t.onabort = () => rej(t.error || new Error('Cache write failed'));
+    });
+  },
+  get(k) { return this.tx('readonly', (st) => st.get(k)).then((v) => (v === undefined ? null : v)); },
+  set(k, v) { return this.tx('readwrite', (st) => st.put(v, k)); },
+  del(k) { return this.tx('readwrite', (st) => st.delete(k)); }
+};
+
+async function loadCache() {
+  let d = null;
+  try { d = await IDB.get('data'); } catch (e) { /* fall through to the older store */ }
+  return d || LS.get('data', null);
+}
+
+/** Keeps the latest data on the phone so the app opens instantly next time. Records whether the save worked. */
+function saveData() {
+  if (!S.data) return Promise.resolve();
+  const count = (S.data.meals || []).length;
+  return IDB.set('data', S.data).then(() => {
+    LS.del('data'); // the older, smaller store is no longer needed
+    S.cache = { ok: true, at: Date.now(), meals: count }; LS.set('cache', S.cache);
+  }).catch((e) => {
+    try { localStorage.setItem('ft_data', JSON.stringify(S.data)); S.cache = { ok: true, at: Date.now(), meals: count }; }
+    catch (e2) { S.cache = { ok: false, error: String((e2 && e2.name) || (e && e.message) || 'unknown') }; }
+    LS.set('cache', S.cache);
+  });
+}
 
 async function flushQueue() {
   while (S.queue.length) {
@@ -90,15 +137,20 @@ async function flushQueue() {
 async function sync(quiet) {
   if (!S.conn || S.syncing) return;
   S.syncing = true; S.syncError = ''; paintSync();
+  const began = Date.now();
   try {
     await flushQueue();
     S.data = await api('bootstrap', { days: 100 });
     saveData();
-    render();
+    S.lastSync = { at: Date.now(), ms: Date.now() - began }; LS.set('lastSync', S.lastSync);
+    // redraw with the fresh data, unless you are in the middle of typing on this screen
+    const el = document.activeElement;
+    if (!(el && $('#view').contains(el) && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) render();
   } catch (e) {
-    S.syncError = isOffline(e) ? 'Offline - showing saved data' : e.message;
+    S.syncError = isOffline(e) ? (S.data ? 'Offline - showing saved data' : 'Could not reach the Sheet, and there is no saved copy on this phone yet. Check your connection.') : e.message;
     if (!quiet) toast(S.syncError);
     if (/Wrong PIN|No PIN/.test(e.message)) { S.syncing = false; return showSetup(e.message); }
+    if (!S.data) { S.syncing = false; return render(); } // nothing cached yet: show the problem on the loading screen
   }
   S.syncing = false; paintSync();
 }
@@ -179,8 +231,9 @@ function showSetup(message) {
     try {
       const conn = { url: v.url, pin: v.pin };
       await api('ping', {}, conn);
-      S.conn = conn; LS.set('conn', conn);
+      S.conn = conn; LS.set('conn', conn); IDB.set('conn', conn).catch(() => {});
       S.data = await api('bootstrap', { days: 100 }); saveData();
+      if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {}); // ask the browser not to clear this app's data
       S.view = 'today'; S.date = today(); render();
     } catch (err) {
       toast(isOffline(err) ? 'Could not reach that URL. Check it and your connection.' : err.message);
@@ -552,6 +605,8 @@ function viewSettings() {
     '</div><div class="small mute" id="goalMath"></div><button class="btn primary" type="submit">Save targets</button></form></section>';
   h += '<section class="card"><h2>Connection</h2><div class="small mute" style="overflow-wrap:anywhere">' + esc(S.conn ? S.conn.url : '') + '</div><div class="small mute" id="syncState"></div>' +
     '<button class="btn" id="syncNow">Sync now</button><button class="btn danger" id="disconnect">Disconnect this phone</button>' +
+    '<p class="small mute">' + (S.cache ? (S.cache.ok ? 'Saved on this phone at ' + clock(S.cache.at) + ' (' + fmt(S.cache.meals) + ' meals), so the app opens without waiting.' : 'Could not save a copy on this phone (' + esc(S.cache.error) + '). The app will load from the Sheet each time.') : 'No copy saved on this phone yet.') +
+    (S.lastSync ? ' Last sync ' + clock(S.lastSync.at) + ', took ' + fmt(S.lastSync.ms / 1000, 1) + ' s.' : '') + '</p>' +
     '<p class="small mute">Your data lives in your Google Sheet. Food scanning: ' + (D().geminiReady ? 'ready' : 'no Gemini key set yet (Sheet menu: Fit Tracker › Set Gemini API key)') + '.</p></section>';
   $('#view').innerHTML = h; paintSync();
   $('#follow').onchange = (e) => { p.follow = e.target.checked; LS.set('prefs', p); applyTheme(); render(); };
@@ -569,15 +624,25 @@ function viewSettings() {
   const dc = $('#disconnect');
   dc.onclick = () => {
     if (dc.dataset.armed !== '1') { dc.dataset.armed = '1'; dc.textContent = 'Tap again to disconnect'; return; }
-    LS.del('conn'); LS.del('data'); LS.del('queue'); S.conn = null; S.data = null; S.queue = []; showSetup();
+    LS.del('conn'); LS.del('data'); LS.del('queue'); LS.del('cache'); LS.del('last'); IDB.del('data').catch(() => {}); IDB.del('conn').catch(() => {}); S.conn = null; S.data = null; S.queue = []; S.cache = null; showSetup();
   };
 }
 
 /* ================================================================== */
 /* Shell                                                               */
 /* ================================================================== */
+function viewLoading() {
+  $('#view').innerHTML = '<div class="head"><div><div class="eyebrow">' + esc(nice(today())) + '</div><h1>Fit Tracker</h1></div></div>' +
+    (S.syncError
+      ? '<div class="callout">' + esc(S.syncError) + '</div><button class="btn primary" id="retrySync">Try again</button>'
+      : '<div class="card"><div class="center"><div class="spinner" role="img" aria-label="Loading"></div><div><b>Loading your data</b><div class="small mute">Only the first open takes this long. After that the app opens from the copy on your phone.</div></div></div></div>');
+  const r = $('#retrySync'); if (r) r.onclick = () => { S.syncError = ''; render(); sync(false); };
+}
+
 function render() {
   if (!S.conn) return showSetup();
+  if (!S.data) { $('#nav').hidden = true; return viewLoading(); }
+  LS.set('last', { view: S.view, date: S.date, at: Date.now() });
   $('#nav').hidden = false;
   $$('#nav [data-view]').forEach((b) => { if (b.dataset.view === S.view) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   ({ today: viewToday, trends: viewTrends, reports: viewReports, settings: viewSettings }[S.view] || viewToday)();
@@ -587,8 +652,17 @@ $('#scanBtn').onclick = addSheet;
 window.addEventListener('online', () => sync(true));
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.conn) { if (S.view === 'today' && !sheet.open && S.date !== today() && S.lastSeen !== today()) S.date = today(); S.lastSeen = today(); sync(true); } });
 
-applyTheme();
-S.date = today(); S.lastSeen = today();
-render();
-if (S.conn) sync(true);
+async function start() {
+  applyTheme();
+  S.date = today(); S.lastSeen = today();
+  S.cache = LS.get('cache', null); S.lastSync = LS.get('lastSync', null);
+  // pick up where you left off if you were here in the last 15 minutes (for example after switching to the camera)
+  const last = LS.get('last', null);
+  if (last && Date.now() - last.at < 15 * 60000 && last.view) { S.view = last.view; if (last.date && last.date <= today()) S.date = last.date; }
+  if (!S.conn) { try { S.conn = await IDB.get('conn'); } catch (e) { /* stay signed out */ } } // second copy of the sign-in, in case the small store was full
+  if (S.conn) S.data = await loadCache();
+  render();
+  if (S.conn) sync(true);
+}
+start();
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) navigator.serviceWorker.register('./sw.js').catch(() => { /* the app still works without offline support */ });
