@@ -1,7 +1,7 @@
 /* Fit Tracker - front end. Plain JavaScript, no build step. Talks to the Apps Script web app. */
 'use strict';
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.1.1';
 const $ = (sel, el) => (el || document).querySelector(sel);
 const $$ = (sel, el) => Array.from((el || document).querySelectorAll(sel));
 const esc = (s) => String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -39,6 +39,7 @@ const nice = (s) => { const d = parseYmd(s); return DOW[d.getDay()] + ' ' + d.ge
 const fmt = (n, dp) => (n === null || n === undefined || isNaN(n)) ? '–' : Number(n).toLocaleString('en-US', { maximumFractionDigits: dp || 0, minimumFractionDigits: 0 });
 const sum = (a) => a.reduce((s, v) => s + (Number(v) || 0), 0);
 const avg = (a) => a.length ? sum(a) / a.length : null;
+const shortUrl = (u) => { u = String(u || ''); return u.length > 70 ? u.slice(0, 44) + '…' + u.slice(-18) : u; };
 const clock = (ms) => { const d = new Date(ms); return (ymd(d) === today() ? '' : nice(ymd(d)) + ' ') + pad(d.getHours()) + ':' + pad(d.getMinutes()); };
 const hm = (min) => (min === null || min === undefined) ? '–' : Math.floor(min / 60) + ' h ' + pad(Math.round(min % 60)) + ' m';
 const numOrNull = (v) => { if (v === '' || v === null || v === undefined) return null; const n = Number(String(v).replace(',', '.')); return isFinite(n) ? n : null; };
@@ -64,12 +65,17 @@ function toast(msg) {
 /* ---------- server ---------- */
 async function api(action, payload, conn) {
   const c = conn || S.conn;
+  if (/[?&]hook=/.test(c.url)) throw new Error('This phone is set up with the Watch webhook URL. Use Change connection and paste the App URL instead: the one ending in /exec.');
   const res = await fetch(c.url, {
     method: 'POST', redirect: 'follow',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // keeps the browser from sending a pre-flight request Apps Script cannot answer
     body: JSON.stringify(Object.assign({ action: action, pin: c.pin }, payload || {}))
   });
-  if (!res.ok) throw new Error('The server answered ' + res.status + '.');
+  if (!res.ok) {
+    if (res.status === 404) throw new Error('Google could not find a web app at the App URL (error 404). The deployment it points to may have been archived or replaced, or the URL is incomplete. Copy the App URL again from the Sheet (Fit Tracker > Show connection details) and use Change connection.');
+    if (res.status === 401 || res.status === 403) throw new Error('Google refused the request (error ' + res.status + '). In Apps Script, open Deploy > Manage deployments and check "Who has access" is set to Anyone.');
+    throw new Error('Google answered with error ' + res.status + '. Try again in a minute.');
+  }
   let j;
   try { j = await res.json(); } catch (e) { throw new Error('Unexpected reply. Check the app URL, and that the web app is deployed for "Anyone".'); }
   if (!j.ok) throw new Error(j.error || 'Request failed.');
@@ -112,6 +118,12 @@ async function loadCache() {
 }
 
 /** Keeps the latest data on the phone so the app opens instantly next time. Records whether the save worked. */
+/** A real reply has your meals in it. Anything else means the URL points at the wrong thing. */
+function checkData(d) {
+  if (!d || !Array.isArray(d.meals)) throw new Error('The URL answered, but not with your data. Make sure it is the App URL (ending in /exec), not the Watch webhook URL.');
+  return d;
+}
+
 function saveData() {
   if (!S.data) return Promise.resolve();
   const count = (S.data.meals || []).length;
@@ -140,7 +152,7 @@ async function sync(quiet) {
   const began = Date.now();
   try {
     await flushQueue();
-    S.data = await api('bootstrap', { days: 100 });
+    S.data = checkData(await api('bootstrap', { days: 100 }));
     saveData();
     S.lastSync = { at: Date.now(), ms: Date.now() - began }; LS.set('lastSync', S.lastSync);
     // redraw with the fresh data, unless you are in the middle of typing on this screen
@@ -218,25 +230,30 @@ function showSetup(message) {
   const c = S.conn || { url: '', pin: '' };
   $('#view').innerHTML =
     '<div class="head"><div><div class="eyebrow">Welcome</div><h1>Fit Tracker</h1></div></div>' +
-    (message ? '<div class="callout">' + esc(message) + '</div>' : '') +
+    '<div id="setupMsg" role="alert">' + (message ? '<div class="callout">' + esc(message) + '</div>' : '') + '</div>' +
     '<form id="setupForm" class="card">' +
     '<p class="mute small">Connect this app to your Google Sheet. In the Sheet, open the menu <b>Fit Tracker › Show connection details</b> and copy the App URL.</p>' +
     field('App URL', 'url', c.url, 'type="url" required placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off"') +
     field('PIN', 'pin', '', 'type="password" required autocomplete="current-password"') +
-    '<button class="btn primary" type="submit">Connect</button></form>';
+    '<button class="btn primary" type="submit">Connect</button></form>' + (S.conn && S.data ? '<button class="btn" id="cancelSetup">Cancel</button>' : '');
+  const cancel = $('#cancelSetup'); if (cancel) cancel.onclick = () => render();
   $('#setupForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const v = formValues(e.target), btn = $('button', e.target);
     busy(btn, true, 'Connecting…');
     try {
-      const conn = { url: v.url, pin: v.pin };
+      const conn = { url: v.url.trim(), pin: v.pin };
+      if (/[?&]hook=/.test(conn.url)) throw new Error('That is the Watch webhook URL. Paste the App URL instead: the one ending in /exec.');
+      if (!/^https:\/\/script\.google\.com\/.+\/exec$/.test(conn.url) && !/^http:\/\/localhost/.test(conn.url)) throw new Error('The App URL should start with https://script.google.com/ and end with /exec.');
       await api('ping', {}, conn);
+      const data = checkData(await api('bootstrap', { days: 100 }, conn));
       S.conn = conn; LS.set('conn', conn); IDB.set('conn', conn).catch(() => {});
-      S.data = await api('bootstrap', { days: 100 }); saveData();
+      S.data = data; S.syncError = ''; saveData();
       if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {}); // ask the browser not to clear this app's data
       S.view = 'today'; S.date = today(); render();
     } catch (err) {
-      toast(isOffline(err) ? 'Could not reach that URL. Check it and your connection.' : err.message);
+      $('#setupMsg').innerHTML = '<div class="callout">' + esc(isOffline(err) ? 'Could not reach that URL. Check it and your connection.' : err.message) + '</div>';
+      window.scrollTo(0, 0);
       busy(btn, false, 'Connect');
     }
   });
@@ -604,7 +621,7 @@ function viewSettings() {
     numField('Calories', 'calorie_target', g.calorie_target, '10') + numField('Protein (g)', 'protein_g', g.protein_g, '1') + numField('Carbs (g)', 'carbs_g', g.carbs_g, '1') + numField('Fat (g)', 'fat_g', g.fat_g, '1') + numField('Goal weight (kg)', 'weight_goal_kg', g.weight_goal_kg, '0.1') +
     '</div><div class="small mute" id="goalMath"></div><button class="btn primary" type="submit">Save targets</button></form></section>';
   h += '<section class="card"><h2>Connection</h2><div class="small mute" style="overflow-wrap:anywhere">' + esc(S.conn ? S.conn.url : '') + '</div><div class="small mute" id="syncState"></div>' +
-    '<button class="btn" id="syncNow">Sync now</button><button class="btn danger" id="disconnect">Disconnect this phone</button>' +
+    '<button class="btn" id="syncNow">Sync now</button><button class="btn" id="changeConn2">Change App URL or PIN</button><button class="btn danger" id="disconnect">Disconnect this phone</button>' +
     '<p class="small mute">' + (S.cache ? (S.cache.ok ? 'Saved on this phone at ' + clock(S.cache.at) + ' (' + fmt(S.cache.meals) + ' meals), so the app opens without waiting.' : 'Could not save a copy on this phone (' + esc(S.cache.error) + '). The app will load from the Sheet each time.') : 'No copy saved on this phone yet.') +
     (S.lastSync ? ' Last sync ' + clock(S.lastSync.at) + ', took ' + fmt(S.lastSync.ms / 1000, 1) + ' s.' : '') + '</p>' +
     '<p class="small mute">Your data lives in your Google Sheet. Food scanning: ' + (D().geminiReady ? 'ready' : 'no Gemini key set yet (Sheet menu: Fit Tracker › Set Gemini API key)') + '.</p></section>';
@@ -621,6 +638,7 @@ function viewSettings() {
     busy(btn, false, 'Save targets'); if (okay) { toast('Targets saved'); render(); }
   });
   $('#syncNow').onclick = () => sync(false);
+  $('#changeConn2').onclick = () => showSetup();
   const dc = $('#disconnect');
   dc.onclick = () => {
     if (dc.dataset.armed !== '1') { dc.dataset.armed = '1'; dc.textContent = 'Tap again to disconnect'; return; }
@@ -634,9 +652,10 @@ function viewSettings() {
 function viewLoading() {
   $('#view').innerHTML = '<div class="head"><div><div class="eyebrow">' + esc(nice(today())) + '</div><h1>Fit Tracker</h1></div></div>' +
     (S.syncError
-      ? '<div class="callout">' + esc(S.syncError) + '</div><button class="btn primary" id="retrySync">Try again</button>'
+      ? '<div class="callout">' + esc(S.syncError) + '</div><p class="small mute" style="overflow-wrap:anywhere">App URL in use: ' + esc(shortUrl(S.conn.url)) + '</p><button class="btn primary" id="retrySync">Try again</button><button class="btn" id="changeConn">Change connection</button>'
       : '<div class="card"><div class="center"><div class="spinner" role="img" aria-label="Loading"></div><div><b>Loading your data</b><div class="small mute">Only the first open takes this long. After that the app opens from the copy on your phone.</div></div></div></div>');
   const r = $('#retrySync'); if (r) r.onclick = () => { S.syncError = ''; render(); sync(false); };
+  const c = $('#changeConn'); if (c) c.onclick = () => showSetup();
 }
 
 function render() {
