@@ -1,7 +1,7 @@
 /* Fit Tracker - front end. Plain JavaScript, no build step. Talks to the Apps Script web app. */
 'use strict';
 
-const APP_VERSION = '1.1.1';
+const APP_VERSION = '1.2.0';
 const $ = (sel, el) => (el || document).querySelector(sel);
 const $$ = (sel, el) => Array.from((el || document).querySelectorAll(sel));
 const esc = (s) => String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -153,7 +153,7 @@ async function sync(quiet) {
   try {
     await flushQueue();
     S.data = checkData(await api('bootstrap', { days: 100 }));
-    saveData();
+    await saveData();
     S.lastSync = { at: Date.now(), ms: Date.now() - began }; LS.set('lastSync', S.lastSync);
     // redraw with the fresh data, unless you are in the middle of typing on this screen
     const el = document.activeElement;
@@ -282,7 +282,7 @@ function viewToday() {
     : '<button class="tile" data-body="' + key + '"><span class="lbl">' + label + '</span><span class="add">+ Add</span></button>';
 
   let h = '<div class="head"><div><div class="eyebrow">' + esc(nice(d)) + '</div><h1>' + (isToday ? 'Today' : (d === addDays(today(), -1) ? 'Yesterday' : esc(nice(d)))) + '</h1><div class="sync" id="syncState"></div></div>' +
-    '<div class="row" style="gap:8px"><button class="icon-btn" id="prevDay" aria-label="Previous day"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button>' +
+    '<div class="row" style="gap:8px"><label class="icon-btn" style="position:relative"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16"/><path d="M9 3v4"/><path d="M15 3v4"/></svg><input type="date" id="jumpDate" aria-label="Go to a date" value="' + d + '" max="' + today() + '"' + (D().from ? ' min="' + D().from + '"' : '') + ' style="position:absolute;inset:0;width:100%;height:100%;opacity:0"></label><button class="icon-btn" id="prevDay" aria-label="Previous day"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button>' +
     '<button class="icon-btn" id="nextDay" aria-label="Next day"' + (isToday ? ' disabled' : '') + '><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></button></div></div>';
 
   h += '<section class="card"><div class="row between" style="align-items:flex-end"><div class="row" style="align-items:baseline;gap:8px">' +
@@ -321,6 +321,7 @@ function viewToday() {
   $('#view').innerHTML = h;
   paintSync();
   $('#prevDay').onclick = () => { S.date = addDays(S.date, -1); render(); };
+  $('#jumpDate').onchange = (e) => { const v = e.target.value; if (/^\d{4}-\d\d-\d\d$/.test(v) && v <= today()) { S.date = v; render(); } };
   $('#nextDay').onclick = () => { if (S.date < today()) { S.date = addDays(S.date, 1); render(); } };
   $$('[data-body]').forEach((el) => { el.onclick = () => bodySheet(el.dataset.body); });
   $$('[data-meal]').forEach((el) => { el.onclick = () => { const m = D().meals.find((x) => String(x.id) === el.dataset.meal); if (m._pending) toast('This entry is still waiting to upload.'); else mealForm(m, false); }; });
@@ -394,34 +395,103 @@ function activityForm(a) {
 /* ================================================================== */
 /* Adding food                                                         */
 /* ================================================================== */
+const STAR = (on) => '<svg aria-hidden="true" viewBox="0 0 24 24"' + (on ? ' style="fill:currentColor"' : '') + '><path d="M12 3.5l2.6 5.4 5.9.8-4.3 4.1 1 5.9L12 16.9l-5.2 2.8 1-5.9L3.5 9.7l5.9-.8z"/></svg>';
+const titleKey = (m) => String(m.title || '').trim().toLowerCase();
+const newestFirst = (a, b) => (a.date < b.date ? 1 : (a.date > b.date ? -1 : (b.id > a.id ? 1 : -1)));
+
+/** Starred meals, one per name. Includes ones older than the days kept on the phone. */
+function favourites() {
+  const seen = {}, out = [];
+  (D().favorites || []).concat(D().meals.filter((m) => m.starred === 'yes')).sort(newestFirst).forEach((m) => {
+    const k = titleKey(m); if (!seen[k]) { seen[k] = true; out.push(m); }
+  });
+  return out;
+}
+/** Every food you have logged, one per name, newest first. */
+function knownFoods() {
+  const seen = {}, out = [];
+  favourites().concat(D().meals.filter((m) => !m._pending).slice().sort(newestFirst)).forEach((m) => {
+    const k = titleKey(m); if (!seen[k]) { seen[k] = true; out.push(m); }
+  });
+  return out;
+}
+function findFood(id) { return D().meals.concat(D().favorites || []).find((x) => String(x.id) === String(id)); }
+/** Keeps the phone's favourites list in step after a meal is saved, starred or deleted. */
+function trackFavourite(m, removed) {
+  if (!S.data || !m) return;
+  S.data.favorites = (S.data.favorites || []).filter((x) => x.id !== m.id);
+  if (!removed && m.starred === 'yes') S.data.favorites.push(m);
+  const i = S.data.meals.findIndex((x) => x.id === m.id);
+  if (i !== -1 && !removed) S.data.meals[i] = m;
+}
+
 function recentMeals() {
   const seen = {}, out = [];
-  D().meals.slice().sort((a, b) => (a.date < b.date ? 1 : -1)).forEach((m) => {
-    const k = m.title.toLowerCase();
+  D().meals.slice().sort(newestFirst).forEach((m) => {
+    const k = titleKey(m);
     if (seen[k]) { seen[k].n++; return; }
     seen[k] = { m: m, n: 1 }; out.push(seen[k]);
   });
-  return out.slice(0, 60).sort((a, b) => b.n - a.n).slice(0, 10).map((x) => x.m);
+  const fav = {}; favourites().forEach((m) => { fav[titleKey(m)] = true; });
+  return out.slice(0, 60).filter((x) => !fav[titleKey(x.m)]).sort((a, b) => b.n - a.n).slice(0, 8).map((x) => x.m);
 }
 
-function addSheet() {
-  const rec = recentMeals();
+function foodRow(m) {
+  const on = m.starred === 'yes';
+  return '<div class="row" style="gap:8px"><button class="item grow" data-log="' + esc(m.id) + '"><div class="grow"><div class="title">' + esc(m.title) + '</div><div class="small mute">P ' + fmt(m.protein_g) + ' · C ' + fmt(m.carbs_g) + ' · F ' + fmt(m.fat_g) + '</div></div><div class="num kcal">' + fmt(m.calories) + '</div></button>' +
+    '<button class="icon-btn" data-star="' + esc(m.id) + '" aria-pressed="' + on + '" aria-label="' + (on ? 'Remove from favourites' : 'Add to favourites') + '"' + (on ? ' style="color:var(--accent)"' : '') + '>' + STAR(on) + '</button></div>';
+}
+
+/** Logging a food you have had before: same numbers, today's date, with a portion choice. */
+function relog(m) {
+  const c = Object.assign({}, m, { source: 'repeat', notes: '', review_flag: '', confidence: '' });
+  delete c.id; delete c.date; delete c.time; delete c.starred; delete c._pending; delete c.created_at;
+  mealForm(c, true, '', { base: c });
+}
+
+function addSheet(keepQuery) {
   let h = sheetHead('Add food') + '<div class="choices">' +
     '<label class="choice main"><input type="file" accept="image/*" capture="environment" id="camInput"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>Take photo</label>' +
     '<label class="choice"><input type="file" accept="image/*" id="pickInput"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 16l5-5 4 4 3-3 6 6"/></svg>Choose photo</label>' +
     '<button class="choice" id="describeBtn"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h10"/></svg>Describe it</button>' +
     '<button class="choice" id="manualBtn"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>Enter by hand</button></div>' +
     field('Note for the scan (optional)', 'note', '', 'id="scanNote" placeholder="e.g. ate half, no rice, 2 servings" maxlength="300"') +
-    '<p class="small mute">Photos of nutrition labels work too, and are the most accurate.</p>';
-  if (rec.length) {
-    h += '<h2>Log again</h2><div class="list">' + rec.map((m) => '<button class="item" data-again="' + esc(m.id) + '"><div class="grow"><div class="title">' + esc(m.title) + '</div><div class="small mute">P ' + fmt(m.protein_g) + ' · C ' + fmt(m.carbs_g) + ' · F ' + fmt(m.fat_g) + '</div></div><div class="num kcal">' + fmt(m.calories) + '</div></button>').join('') + '</div>';
-  }
+    field('Find a food you have logged before', 'q', typeof keepQuery === 'string' ? keepQuery : '', 'id="foodSearch" type="search" placeholder="Type a few letters" autocomplete="off" autocapitalize="none"') +
+    '<div id="foodLists" class="list" style="gap:14px"></div>';
   openSheet(h);
+  const lists = $('#foodLists'), search = $('#foodSearch');
+  const paint = () => {
+    const q = search.value.trim().toLowerCase();
+    let out = '';
+    if (q) {
+      const words = q.split(/\s+/);
+      const hits = knownFoods().filter((m) => words.every((w) => titleKey(m).indexOf(w) !== -1)).slice(0, 20);
+      out = '<h2>' + (hits.length ? 'Matches' : 'No matches in your log') + '</h2><div class="list">' + hits.map(foodRow).join('') + '</div>';
+    } else {
+      const fav = favourites(), rec = recentMeals();
+      out = '<h2>Favourites</h2>' + (fav.length ? '<div class="list">' + fav.map(foodRow).join('') + '</div>' : '<div class="dashed">Tap the star beside any food to keep it here.</div>');
+      if (rec.length) out += '<h2>Logged often</h2><div class="list">' + rec.map(foodRow).join('') + '</div>';
+    }
+    lists.innerHTML = out;
+    $$('[data-log]', lists).forEach((el) => { el.onclick = () => { const m = findFood(el.dataset.log); if (m) relog(m); }; });
+    $$('[data-star]', lists).forEach((el) => { el.onclick = async () => {
+      const m = findFood(el.dataset.star); if (!m) return;
+      if (m._pending) { toast('This entry is still waiting to upload.'); return; }
+      el.disabled = true;
+      const want = m.starred !== 'yes';
+      // starring by name: unstarring clears every saved entry with that name so it does not reappear
+      const targets = want ? [m] : D().meals.concat(D().favorites || []).filter((x) => x.starred === 'yes' && titleKey(x) === titleKey(m)).filter((x, i, a) => a.findIndex((y) => y.id === x.id) === i);
+      let okay = true;
+      for (const t of targets) okay = (await write('meal.star', { id: t.id, starred: want }, (res) => { if (res) trackFavourite(res); }, false)) && okay;
+      if (okay) toast(want ? 'Added to favourites' : 'Removed from favourites');
+      paint();
+    }; });
+  };
+  search.addEventListener('input', paint); paint();
   const onFile = (e) => { const f = e.target.files && e.target.files[0]; if (f) runScan({ file: f, text: $('#scanNote').value.trim() }); };
   $('#camInput').onchange = onFile; $('#pickInput').onchange = onFile;
   $('#manualBtn').onclick = () => mealForm({}, true);
   $('#describeBtn').onclick = describeSheet;
-  $$('[data-again]').forEach((el) => { el.onclick = () => { const m = D().meals.find((x) => String(x.id) === el.dataset.again); const c = Object.assign({}, m, { source: 'repeat', notes: '' }); delete c.id; delete c.date; delete c.time; mealForm(c, true); }; });
 }
 
 function describeSheet() {
@@ -459,7 +529,9 @@ async function runScan(input) {
   }
 }
 
-function mealForm(m, isNew, assumptions) {
+function mealForm(m, isNew, assumptions, opts) {
+  const base = opts && opts.base;
+  let starred = m.starred === 'yes';
   const date = m.date || S.date;
   const time = m.time || (isNew && date === today() ? nowTime() : '');
   const conf = m.confidence ? '<span class="badge' + (m.confidence === 'low' ? ' warn' : '') + '">' + esc(m.confidence) + ' confidence</span>' : '';
@@ -467,6 +539,7 @@ function mealForm(m, isNew, assumptions) {
   if (conf || assumptions) h += '<div class="small mute">' + conf + ' ' + esc(assumptions || '') + '</div>';
   if (m.review_flag) h += '<div class="callout">Worth a check: the calories and macros do not add up (' + esc(m.review_flag) + ').</div>';
   h += field('Name', 'title', m.title, 'required maxlength="200"') +
+    (base ? '<div class="field">Portion<div class="chips" role="group" aria-label="Portion">' + [[0.5, '½×'], [1, '1×'], [1.5, '1½×'], [2, '2×']].map((p) => '<button type="button" class="chip" data-portion="' + p[0] + '" aria-pressed="' + (p[0] === 1) + '">' + p[1] + '</button>').join('') + '</div></div>' : '') +
     '<div class="grid2">' + field('Date', 'date', date, 'type="date" required max="' + today() + '"') + field('Time eaten', 'time', time, 'type="time"') + '</div>' +
     '<div class="grid2">' + numField('Calories', 'calories', m.calories, '1') + numField('Protein (g)', 'protein_g', m.protein_g, '0.1') + '</div>' +
     '<div class="grid2">' + numField('Carbs (g)', 'carbs_g', m.carbs_g, '0.1') + numField('Fat (g)', 'fat_g', m.fat_g, '0.1') + '</div>' +
@@ -474,18 +547,31 @@ function mealForm(m, isNew, assumptions) {
     '<div class="grid3">' + numField('Sat fat (g)', 'sat_fat_g', m.sat_fat_g, '0.1') + numField('Trans fat (g)', 'trans_fat_g', m.trans_fat_g, '0.1') + numField('Fibre (g)', 'fiber_g', m.fiber_g, '0.1') + '</div>' +
     '<div class="grid3">' + numField('Added sugar (g)', 'added_sugar_g', m.added_sugar_g, '0.1') + numField('Sodium (mg)', 'sodium_mg', m.sodium_mg, '1') + numField('Alcohol (g)', 'alcohol_g', m.alcohol_g, '0.1') + '</div>' +
     field('Tags (ingredients and food types, comma separated)', 'tags', m.tags, 'maxlength="200" autocapitalize="none"') + field('Notes', 'notes', m.notes, 'maxlength="500"') + '</div></details>' +
+    '<button type="button" class="chip" id="starBtn" aria-pressed="' + starred + '" style="display:flex;align-items:center;justify-content:center;gap:8px">' + STAR(starred) + '<span>' + (starred ? 'In your favourites' : 'Add to favourites') + '</span></button>' +
     '<button class="btn primary" type="submit">' + (isNew ? 'Save meal' : 'Save changes') + '</button>' + (isNew ? '' : '<button class="btn danger" type="button" id="delMeal">Delete</button>') + '</form>';
   openSheet(h);
   const form = $('#mealForm');
+  const starBtn = $('#starBtn');
+  starBtn.onclick = () => { starred = !starred; starBtn.setAttribute('aria-pressed', starred); starBtn.innerHTML = STAR(starred) + '<span>' + (starred ? 'In your favourites' : 'Add to favourites') + '</span>'; };
+  const NUMS = ['calories', 'protein_g', 'carbs_g', 'fat_g', 'sat_fat_g', 'trans_fat_g', 'fiber_g', 'added_sugar_g', 'sodium_mg', 'alcohol_g'];
+  let portionNote = '';
+  $$('[data-portion]', form).forEach((el) => { el.onclick = () => {
+    const p = Number(el.dataset.portion);
+    $$('[data-portion]', form).forEach((x) => x.setAttribute('aria-pressed', x === el));
+    NUMS.forEach((k) => { const v = base[k]; if (v === null || v === undefined || v === '') return; const whole = (k === 'calories' || k === 'sodium_mg'); form.elements[k].value = whole ? Math.round(v * p) : Math.round(v * p * 10) / 10; });
+    const notes = form.elements.notes;
+    if (notes.value === portionNote) { portionNote = p === 1 ? '' : el.textContent + ' portion'; notes.value = portionNote; }
+  }; });
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const v = formValues(form);
-    const meal = { title: v.title, date: v.date, time: v.time, tags: v.tags, notes: v.notes, source: m.source || 'manual', confidence: m.confidence || '' };
+    const meal = { title: v.title, date: v.date, time: v.time, tags: v.tags, notes: v.notes, source: m.source || 'manual', confidence: m.confidence || '', starred: starred ? 'yes' : '' };
     ['calories', 'protein_g', 'carbs_g', 'fat_g', 'sat_fat_g', 'trans_fat_g', 'fiber_g', 'added_sugar_g', 'sodium_mg', 'alcohol_g'].forEach((k) => { meal[k] = numOrNull(v[k]); });
     if (!isNew) meal.id = m.id;
     const btn = $('button[type=submit]', form); busy(btn, true, 'Saving…');
     const okay = await write('meal.save', { meal: meal }, (out, queued) => {
       upsert(D().meals, queued ? Object.assign({ id: 'tmp-' + Date.now(), _pending: true }, meal) : out, 'id');
+      if (!queued) trackFavourite(out);
     }, isNew);
     if (okay) { closeSheet(); S.date = meal.date; S.view = 'today'; render(); if (isNew) toast('Saved'); } else busy(btn, false, isNew ? 'Save meal' : 'Save changes');
   });
@@ -493,7 +579,7 @@ function mealForm(m, isNew, assumptions) {
   if (del) del.onclick = async () => {
     if (del.dataset.armed !== '1') { del.dataset.armed = '1'; del.textContent = 'Tap again to delete'; return; }
     busy(del, true, 'Deleting…');
-    const okay = await write('meal.delete', { id: m.id }, () => { S.data.meals = D().meals.filter((x) => x.id !== m.id); }, false);
+    const okay = await write('meal.delete', { id: m.id }, () => { S.data.meals = D().meals.filter((x) => x.id !== m.id); trackFavourite(m, true); }, false);
     if (okay) { closeSheet(); render(); } else busy(del, false, 'Delete');
   };
 }
