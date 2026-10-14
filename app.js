@@ -1,7 +1,7 @@
 /* Fit Tracker - front end. Plain JavaScript, no build step. Talks to the Apps Script web app. */
 'use strict';
 
-const APP_VERSION = '1.3.1';
+const APP_VERSION = '1.4.0';
 const $ = (sel, el) => (el || document).querySelector(sel);
 const $$ = (sel, el) => Array.from((el || document).querySelectorAll(sel));
 const esc = (s) => String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -42,6 +42,16 @@ const avg = (a) => a.length ? sum(a) / a.length : null;
 const shortUrl = (u) => { u = String(u || ''); return u.length > 70 ? u.slice(0, 44) + '…' + u.slice(-18) : u; };
 const clock = (ms) => { const d = new Date(ms); return (ymd(d) === today() ? '' : nice(ymd(d)) + ' ') + pad(d.getHours()) + ':' + pad(d.getMinutes()); };
 const hm = (min) => (min === null || min === undefined) ? '–' : Math.floor(min / 60) + ' h ' + pad(Math.round(min % 60)) + ' m';
+/* Scan timing - TEMPORARY. Delete this function and its one call in mealForm to remove. */
+function diagLine(d) {
+  if (!d) return '';
+  const s = (ms) => (ms === null || ms === undefined) ? '?' : (Math.round(ms / 100) / 10) + 's';
+  const bits = ['total ' + s(d.phone_ms), 'server ' + s(d.total_ms), 'Gemini ' + s(d.gemini_ms)];
+  if (d.config_ms) bits.push('Sheet ' + s(d.config_ms));
+  const tok = [d.prompt_tokens ? d.prompt_tokens + ' in' : '', d.thinking_tokens ? d.thinking_tokens + ' thinking' : '', d.output_tokens ? d.output_tokens + ' out' : ''].filter(Boolean).join(', ');
+  return '<div class="small mute" style="opacity:.75">' + esc(bits.join(' · ')) + (tok ? '<br>' + esc(tok + ' tokens') : '') + (d.image_kb ? esc(' · ' + d.image_kb + ' KB sent') : '') + '</div>';
+}
+
 const numOrNull = (v) => { if (v === '' || v === null || v === undefined) return null; const n = Number(String(v).replace(',', '.')); return isFinite(n) ? n : null; };
 
 /* ---------- theme ---------- */
@@ -540,7 +550,9 @@ async function runScan(cap) {
     const now = new Date();
     const payload = { text: cap.text || '', when: DOW[now.getDay()] + ' ' + nowTime(), images: cap.photos };
     if (n) { payload.image = cap.photos[0].data; payload.mime = cap.photos[0].mime; } // also understood by an older back end
+    const t0 = Date.now(); // timing (temporary)
     const r = await api('scan', payload);
+    if (r && r._diag) r._diag.phone_ms = Date.now() - t0; // timing (temporary)
     if (!sheet.open) return; // closed while waiting
     if (cap.text && !r.notes) r.notes = cap.text; // keep what you told the scan with the entry
     mealForm(r, true, r.assumptions);
@@ -559,6 +571,7 @@ function mealForm(m, isNew, assumptions, opts) {
   let h = sheetHead(isNew ? 'Review and save' : 'Edit meal') + '<form id="mealForm" class="list" style="gap:14px">';
   const range = (m.calories_low && m.calories_high) ? 'Likely between ' + fmt(m.calories_low) + ' and ' + fmt(m.calories_high) + ' kcal. ' : '';
   if (conf || assumptions || range) h += '<div class="small mute">' + conf + ' ' + esc(range) + esc(assumptions || '') + '</div>';
+  h += diagLine(m._diag); // timing (temporary): delete this line and the diagLine function to remove
   if (m.review_flag) h += '<div class="callout">Worth a check: the calories and macros do not add up (' + esc(m.review_flag) + ').</div>';
   h += field('Name', 'title', m.title, 'required maxlength="200"') +
     (base ? '<div class="field">Portion<div class="chips" role="group" aria-label="Portion">' + [[0.5, '½×'], [1, '1×'], [1.5, '1½×'], [2, '2×']].map((p) => '<button type="button" class="chip" data-portion="' + p[0] + '" aria-pressed="' + (p[0] === 1) + '">' + p[1] + '</button>').join('') + '</div></div>' : '') +
