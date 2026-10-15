@@ -1,7 +1,7 @@
 /* Fit Tracker - front end. Plain JavaScript, no build step. Talks to the Apps Script web app. */
 'use strict';
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.1';
 const $ = (sel, el) => (el || document).querySelector(sel);
 const $$ = (sel, el) => Array.from((el || document).querySelectorAll(sel));
 const esc = (s) => String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -41,6 +41,7 @@ const sum = (a) => a.reduce((s, v) => s + (Number(v) || 0), 0);
 const avg = (a) => a.length ? sum(a) / a.length : null;
 const shortUrl = (u) => { u = String(u || ''); return u.length > 70 ? u.slice(0, 44) + '…' + u.slice(-18) : u; };
 const clock = (ms) => { const d = new Date(ms); return (ymd(d) === today() ? '' : nice(ymd(d)) + ' ') + pad(d.getHours()) + ':' + pad(d.getMinutes()); };
+const mins = (hhmm) => { const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm || '')); return m ? Number(m[1]) * 60 + Number(m[2]) : null; };
 const hm = (min) => (min === null || min === undefined) ? '–' : Math.floor(min / 60) + ' h ' + pad(Math.round(min % 60)) + ' m';
 /* Scan timing - TEMPORARY. Delete this function and its one call in mealForm to remove. */
 function diagLine(d) {
@@ -305,10 +306,10 @@ function viewToday() {
     '<div class="tiles">' + tile('weight_kg', 'Weight', 'kg', 2) + tile('snore_score', 'Snore score', '', 0) + tile('waist_cm', 'Waist (weekly)', 'cm', 1) + '</div></section>';
 
   if (sl) {
-    const bits = [sl.bedtime && sl.wake_time ? sl.bedtime + ' to ' + sl.wake_time : '', sl.deep_min !== null && sl.deep_min !== undefined ? 'deep ' + hm(sl.deep_min) : '', sl.rem_min ? 'REM ' + hm(sl.rem_min) : '', sl.spo2_avg ? 'oxygen ' + sl.spo2_avg + '%' : ''].filter(Boolean).join(' · ');
-    h += '<button class="item" id="sleepCard"><div class="grow"><div class="small mute">Last night\'s sleep <span class="badge">' + esc(sl.source || '') + '</span></div><div class="num" style="font-size:24px">' + hm(sl.asleep_min) + '</div><div class="small mute">' + esc(bits) + '</div></div></button>';
+    const bits = [sl.bedtime && sl.wake_time ? sl.bedtime + ' to ' + sl.wake_time : '', sl.deep_min !== null && sl.deep_min !== undefined ? 'deep ' + hm(sl.deep_min) : '', sl.rem_min ? 'REM ' + hm(sl.rem_min) : '', sl.spo2_avg ? 'oxygen ' + sl.spo2_avg + '%' + (sl.spo2_min ? ' (low ' + sl.spo2_min + ')' : '') : ''].filter(Boolean).join(' · ');
+    h += '<button class="item" id="sleepCard"><div class="grow"><div class="small mute">Last night\'s sleep <span class="badge">' + esc(sl.source || '') + '</span>' + (String(sl.edited || '').trim() ? ' <span class="badge">edited</span>' : '') + '</div><div class="num" style="font-size:24px">' + hm(sl.asleep_min) + '</div><div class="small mute">' + esc(bits) + '</div></div></button>';
   } else {
-    h += '<div class="dashed row between"><span>No sleep recorded for last night yet. It arrives from your watch.</span><button class="link" id="sleepCard">Add by hand</button></div>';
+    h += '<div class="dashed row between"><span>No sleep recorded yet. It arrives from your watch or phone.</span><button class="link" id="sleepCard">Add by hand</button></div>';
   }
 
   h += '<section class="list"><div class="row between" style="padding:0 4px"><h2>Meals</h2><div class="small mute">' + ms.length + ' logged</div></div>';
@@ -361,17 +362,63 @@ function bodySheet(key) {
   });
 }
 
-/* ---------- sleep by hand ---------- */
+/* ---------- sleep: the same fields the watch sends, editable ---------- */
+const SLEEP_FIELDS = ['bedtime', 'wake_time', 'asleep_min', 'deep_min', 'light_min', 'rem_min', 'awake_min', 'spo2_avg', 'spo2_min', 'resting_hr'];
+
 function sleepForm(sl) {
-  if (sl && sl.source === 'watch') { toast('This night came from your watch.'); return; }
-  openSheet(sheetHead('Sleep') + '<form id="sleepForm" class="list" style="gap:14px"><p class="small mute">For the night ending ' + esc(nice(S.date)) + '. Use this only when the watch did not record it.</p><div class="grid2">' +
-    field('Went to sleep', 'bedtime', sl ? sl.bedtime : '', 'type="time" required') + field('Woke up', 'wake_time', sl ? sl.wake_time : '', 'type="time" required') + '</div>' +
-    numField('Minutes awake in the night (optional)', 'awake_min', sl ? sl.awake_min : '', '5') + '<button class="btn primary" type="submit">Save</button></form>');
-  $('#sleepForm').addEventListener('submit', async (e) => {
+  const date = S.date, b = bodyOn(date) || {};
+  sl = sl || {};
+  const edited = String(sl.edited || '').split(',').map((x) => x.trim()).filter(Boolean);
+  const pretty = (k) => k.replace('_min', '').replace('spo2', 'oxygen').replace('resting_hr', 'resting heart rate').replace(/_/g, ' ');
+  let h = sheetHead('Sleep') +
+    '<p class="small mute">Night ending ' + esc(nice(date)) + (sl.source ? ' · recorded by ' + esc(sl.source) : ' · nothing recorded yet') + '</p>' +
+    (edited.length ? '<div class="callout">You set ' + esc(edited.map(pretty).join(', ')) + ' by hand, so syncing leaves those alone. Empty a box to let the watch fill it again.</div>' : '') +
+    '<form id="sleepForm" class="list" style="gap:14px">' +
+    '<div class="grid2">' + field('Went to sleep', 'bedtime', sl.bedtime, 'type="time"') + field('Woke up', 'wake_time', sl.wake_time, 'type="time"') + '</div>' +
+    '<div class="grid2">' + numField('Asleep (min)', 'asleep_min', sl.asleep_min, '1') + numField('Awake in the night (min)', 'awake_min', sl.awake_min, '1') + '</div>' +
+    '<div class="small mute" id="sleepHint" aria-live="polite"></div>' +
+    '<div class="grid3">' + numField('Deep (min)', 'deep_min', sl.deep_min, '1') + numField('Light (min)', 'light_min', sl.light_min, '1') + numField('REM (min)', 'rem_min', sl.rem_min, '1') + '</div>' +
+    '<div class="grid3">' + numField('Oxygen avg %', 'spo2_avg', sl.spo2_avg, '0.1') + numField('Oxygen low %', 'spo2_min', sl.spo2_min, '1') + numField('Resting HR', 'resting_hr', sl.resting_hr, '1') + '</div>' +
+    numField('Snore score', 'snore_score', b.snore_score, '1') +
+    field('Notes', 'notes', sl.notes, 'maxlength="300"') +
+    '<button class="btn primary" type="submit">Save</button></form>';
+  openSheet(h);
+  const form = $('#sleepForm'), el = form.elements, hint = $('#sleepHint');
+  // Remember what arrived, so saving only claims the boxes you actually changed.
+  const orig = {}; SLEEP_FIELDS.concat(['notes']).forEach((k) => { const v = sl[k]; orig[k] = (v === null || v === undefined) ? '' : String(v); });
+  let asleepTyped = false;
+  // Asleep follows the stages when they are filled, otherwise the time in bed less time awake.
+  const recompute = () => {
+    const st = ['deep_min', 'light_min', 'rem_min'].map((k) => numOrNull(el[k].value));
+    if (st.every((v) => v !== null)) {
+      el.asleep_min.value = Math.round(st.reduce((a, v) => a + (v || 0), 0));
+      hint.textContent = 'Asleep is the three stages added up. Type in it to override.';
+      return;
+    }
+    const bed = mins(el.bedtime.value), wake = mins(el.wake_time.value);
+    if (bed === null || wake === null) { hint.textContent = ''; return; }
+    el.asleep_min.value = Math.max(0, ((wake - bed) + 1440) % 1440 - (numOrNull(el.awake_min.value) || 0));
+    hint.textContent = 'Asleep is the time in bed less time awake. Type in it to override.';
+  };
+  ['deep_min', 'light_min', 'rem_min', 'bedtime', 'wake_time', 'awake_min'].forEach((k) => el[k].addEventListener('input', recompute));
+  el.asleep_min.addEventListener('input', () => { asleepTyped = true; hint.textContent = ''; });
+  form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const v = formValues(e.target); v.date = S.date;
-    const btn = $('button[type=submit]', e.target); busy(btn, true, 'Saving…');
-    const okay = await write('sleep.save', { sleep: v }, (out) => { if (out) upsert(D().sleep, out, 'date'); }, false);
+    const v = formValues(form), fields = {};
+    SLEEP_FIELDS.forEach((k) => {
+      if (k === 'asleep_min' && !asleepTyped) return;   // left to follow the stages or the time in bed
+      const cur = String(v[k] || '');
+      if (cur !== orig[k]) fields[k] = cur;
+    });
+    if (String(v.notes || '') !== orig.notes) fields.notes = v.notes;
+    const was = (b.snore_score === null || b.snore_score === undefined) ? '' : String(b.snore_score);
+    const snoreChanged = String(v.snore_score || '') !== was;
+    if (!Object.keys(fields).length && !snoreChanged) { closeSheet(); return; }
+    const btn = $('button[type=submit]', form); busy(btn, true, 'Saving…');
+    let okay = !Object.keys(fields).length || await write('sleep.save', { sleep: { date: date, fields: fields } }, (out) => { if (out) upsert(D().sleep, out, 'date'); }, false);
+    if (okay && snoreChanged) {
+      okay = await write('body.save', { date: date, fields: { snore_score: numOrNull(v.snore_score) } }, (out) => { if (out) upsert(D().body, out, 'date'); }, false);
+    }
     if (okay) { closeSheet(); render(); } else busy(btn, false, 'Save');
   });
 }
