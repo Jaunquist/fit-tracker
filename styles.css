@@ -130,6 +130,14 @@ details summary { min-height: 44px; display: flex; align-items: center; font-wei
 .spinner { width: 28px; height: 28px; border-radius: 50%; border: 3px solid var(--track); border-top-color: var(--accent); animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
+.spinner.sm { display: inline-block; width: 18px; height: 18px; border-width: 2px; }
+/* A slot of fixed size beside the title, so the status can come and go without moving anything. */
+.syncst { width: 26px; height: 26px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; }
+.syncst .dot { position: relative; min-width: 26px; height: 26px; padding: 0 7px; border: none; border-radius: 13px; background: var(--tint); color: var(--ink); font-size: 13px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
+.syncst .dot.warn { background: var(--warn-tint); color: var(--warn); }
+.syncst .dot::after { content: ''; position: absolute; inset: -9px; }  /* a 44px tap target without changing the layout */
+.syncst .dot svg { width: 15px; height: 15px; stroke-width: 2.2; }
+
 .center { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 28px 0; text-align: center; }
 iframe.report { width: 100%; flex: 1 1 auto; min-height: 60dvh; border: 1px solid var(--line); border-radius: 14px; background: #F2F5F3; }
 
