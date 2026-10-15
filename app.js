@@ -1,7 +1,7 @@
 /* Fit Tracker - front end. Plain JavaScript, no build step. Talks to the Apps Script web app. */
 'use strict';
 
-const APP_VERSION = '1.5.1';
+const APP_VERSION = '1.5.2';
 const $ = (sel, el) => (el || document).querySelector(sel);
 const $$ = (sel, el) => Array.from((el || document).querySelectorAll(sel));
 const esc = (s) => String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -178,8 +178,17 @@ async function sync(quiet) {
   S.syncing = false; paintSync();
 }
 function paintSync() {
-  const el = $('#syncState'); if (!el) return;
-  el.textContent = S.syncing ? 'Syncing…' : (S.syncError || (S.queue.length ? S.queue.length + ' waiting to upload' : ''));
+  const waiting = S.queue.length ? S.queue.length + ' waiting to upload' : '';
+  const label = S.syncing ? 'Syncing' : [waiting, S.syncError].filter(Boolean).join(' · ');
+  const slot = $('#syncState');
+  if (slot) {
+    if (S.syncing) slot.innerHTML = '<span class="spinner sm" role="img" aria-label="Syncing"></span>';
+    else if (waiting) slot.innerHTML = '<button class="dot" id="syncTap" aria-label="' + esc(label) + '">' + S.queue.length + '</button>';
+    else if (S.syncError) slot.innerHTML = '<button class="dot warn" id="syncTap" aria-label="' + esc(label) + '"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 7v6"/><path d="M12 17h.01"/><circle cx="12" cy="12" r="9"/></svg></button>';
+    else slot.innerHTML = '';
+    const tap = $('#syncTap'); if (tap) tap.onclick = () => toast(label);
+  }
+  const text = $('#syncText'); if (text) text.textContent = label;  // the wording stays in Settings
 }
 
 /** Saves to the Sheet; if offline, keeps simple new entries in a queue and shows them straight away. */
@@ -292,7 +301,8 @@ function viewToday() {
     ? '<button class="tile done" data-body="' + key + '"><span class="lbl">' + label + '</span><span class="num">' + fmt(b[key], dp) + ' <small>' + unit + '</small></span></button>'
     : '<button class="tile" data-body="' + key + '"><span class="lbl">' + label + '</span><span class="add">+ Add</span></button>';
 
-  let h = '<div class="head"><div><div class="eyebrow">' + esc(nice(d)) + '</div><h1>' + (isToday ? 'Today' : (d === addDays(today(), -1) ? 'Yesterday' : esc(nice(d)))) + '</h1><div class="sync" id="syncState"></div></div>' +
+  let h = '<div class="head"><div><div class="eyebrow">' + esc(nice(d)) + '</div>' +
+    '<div class="row" style="gap:10px"><h1>' + (isToday ? 'Today' : (d === addDays(today(), -1) ? 'Yesterday' : esc(nice(d)))) + '</h1><span class="syncst" id="syncState" role="status" aria-live="polite"></span></div></div>' +
     '<div class="row" style="gap:8px"><label class="icon-btn" style="position:relative"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16"/><path d="M9 3v4"/><path d="M15 3v4"/></svg><input type="date" id="jumpDate" aria-label="Go to a date" value="' + d + '" max="' + today() + '"' + (D().from ? ' min="' + D().from + '"' : '') + ' style="position:absolute;inset:0;width:100%;height:100%;opacity:0"></label><button class="icon-btn" id="prevDay" aria-label="Previous day"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button>' +
     '<button class="icon-btn" id="nextDay" aria-label="Next day"' + (isToday ? ' disabled' : '') + '><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></button></div></div>';
 
@@ -809,7 +819,7 @@ function viewSettings() {
   h += '<section class="card"><h2>Daily targets</h2><p class="small mute">A fixed target: activity is recorded and reported, but never added back to the budget.</p><form id="goalForm" class="list" style="gap:14px"><div class="grid2">' +
     numField('Calories', 'calorie_target', g.calorie_target, '10') + numField('Protein (g)', 'protein_g', g.protein_g, '1') + numField('Carbs (g)', 'carbs_g', g.carbs_g, '1') + numField('Fat (g)', 'fat_g', g.fat_g, '1') + numField('Goal weight (kg)', 'weight_goal_kg', g.weight_goal_kg, '0.1') +
     '</div><div class="small mute" id="goalMath"></div><button class="btn primary" type="submit">Save targets</button></form></section>';
-  h += '<section class="card"><h2>Connection</h2><div class="small mute" style="overflow-wrap:anywhere">' + esc(S.conn ? S.conn.url : '') + '</div><div class="small mute" id="syncState"></div>' +
+  h += '<section class="card"><h2>Connection</h2><div class="small mute" style="overflow-wrap:anywhere">' + esc(S.conn ? S.conn.url : '') + '</div><div class="small mute" id="syncText"></div>' +
     '<button class="btn" id="syncNow">Sync now</button><button class="btn" id="changeConn2">Change App URL or PIN</button><button class="btn danger" id="disconnect">Disconnect this phone</button>' +
     '<p class="small mute">' + (S.cache ? (S.cache.ok ? 'Saved on this phone at ' + clock(S.cache.at) + ' (' + fmt(S.cache.meals) + ' meals), so the app opens without waiting.' : 'Could not save a copy on this phone (' + esc(S.cache.error) + '). The app will load from the Sheet each time.') : 'No copy saved on this phone yet.') +
     (S.lastSync ? ' Last sync ' + clock(S.lastSync.at) + ', took ' + fmt(S.lastSync.ms / 1000, 1) + ' s.' : '') + '</p>' +
